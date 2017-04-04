@@ -1,0 +1,11 @@
+**jscan**
+
+`jscan` is a command-line utility to aid in scanning documents to pdf. It has
+various options for auto-rotation, clipping, OCR (using Tesseract), and PDF
+conversion. It relies in the ImageMagick library for image conversions, the
+Tesseract library for OCR, and various Perl modules.
+
+This README is a placeholder and will be replaced with more detailed
+information when the project documentation is updated.
+
+This project is considered to be in the alpha development stage.

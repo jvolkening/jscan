@@ -1,0 +1,121 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Getopt::Long;
+use Time::Piece;
+use Switch;
+use autodie qw/:all/;
+
+my $quality = 2;
+my $ocr     = 1;
+my $singles = 0;
+my $letter  = 0;
+my $thresh  = 40;
+my $trim    = 0;
+
+my $scan_count = 0;
+
+GetOptions(
+
+    'quality=i' => \$quality,
+    'ocr=i'     => \$ocr,
+    'singles'   => \$singles,
+    'thresh=i'  => \$thresh,
+    'letter'    => \$letter,
+    'trim'      => \$trim,
+
+);
+
+my $t = localtime();
+my $datestring = $t->ymd;
+my $fulldatestring = $t->datetime();
+my @files = glob "$datestring\_*.pdf";
+my $start_idx = 0;
+my @existing = ();
+for (@files) {
+    my $tmp = $_;
+    $tmp =~ s/$datestring\_//;
+    $tmp =~ s/\.pdf//;
+    push @existing, $tmp;
+}
+
+@existing = sort {$a <=> $b} @existing;
+$start_idx = @existing > 0 ?$existing[-1] + 1 : 1;
+my $page_idx = 1;
+my $basename = sprintf "$datestring\_%05d", $start_idx++;
+my $pagename = sprintf "$basename\.%03d",   $page_idx++;
+my $outname  = "$pagename.pnm";
+my $outname1 = "$pagename.tmp.pnm";
+my $outname2 = "$pagename.png";
+my $pdfname  = "$basename.pdf";
+my $status = 1;
+my @pages;
+
+while ($status) {
+    print "\ninsert sheet\n";
+    my $crop = $trim ? '--swcrop ' : '';
+    system( "scanimage --mode gray --res 300 $crop > $outname" ) if ($quality != 5);
+    system( "scanimage --mode color --res 300 $crop > $outname" ) if ($quality == 5);
+    if ($letter) {
+        system( "letter --in $outname --out $outname1" );
+        unlink $outname;
+    }
+    else {
+        system( "mv $outname $outname1" );
+    }
+    system( "convert $outname1 -resize 150% -contrast-stretch \"0.5%x35%\" $outname2" ) if ($ocr);
+    #system( "convert $outname1 -threshold $thresh% $outname2" ) if ($ocr);
+    #system( "convert $outname1 $outname2") if ($ocr);
+    system( "tesseract -l eng $outname2 $pagename hocr" ) if ($ocr);
+    switch($quality) {
+        case 1 { system( "convert $outname1 -resize 50% -threshold $thresh% -quality 90 $outname2" ) }
+        case 2 { system( "convert $outname1 -threshold $thresh% -quality 90 $outname2" ) }
+        case 3 { system( "convert $outname1 -resize 50% -contrast-stretch \"0.1%x20%\" -colors 4 -quality 90 $outname2" ) }
+        case 4 { system( "convert $outname1 -colors 4 -quality 90 $outname2" ) }
+        else   { system( "convert $outname1 $outname2" ) }
+    }
+    push @pages, $outname2;
+    unlink $outname1;
+    my $ret = 'd';
+    if (! $singles) {
+        print "\nwhat next? (p|d|q)";
+        $ret = <STDIN>;
+        chomp $ret;
+    }
+    if ($ret eq 'p') {
+        $pagename = sprintf "$basename\.%03d", $page_idx++;
+        $outname = "$pagename.pnm";
+        $outname2 = "$pagename.png";
+        next;
+    }
+    #print "Enter keywords: ";
+    #my $keywords = <STDIN>;
+    #chomp $keywords;
+    my $keywords = '';
+    switch($quality) {
+        case 1 { system( "hocr_by_line $ocr 450 150 $pdfname \"$keywords\" @pages" ) }
+        case 3 { system( "hocr_by_line $ocr 450 150 $pdfname \"$keywords\" @pages" ) }
+        else   { system( "hocr_by_line $ocr 450 300 $pdfname \"$keywords\" @pages" ) }
+    }
+    for (@pages) {
+        unlink $_;
+        $_ =~ s/png$/hocr/;
+        unlink $_ if ($ocr);
+    }
+    if ($ret eq 'd') {
+        $basename = sprintf "$datestring\_%05d", $start_idx++;
+        $page_idx = 1;
+        $pagename = sprintf "$basename\.%03d", $page_idx++;
+        $outname = "$pagename.pnm";
+        $outname2 = "$pagename.png";
+        $pdfname = "$basename.pdf";
+        @pages = ();
+	print "Scanned " . ++$scan_count . " documents\n";
+        next;
+    }
+    $status = 0; # on 'q' or other, quit
+}
+
+print "\nBye!\n";
+

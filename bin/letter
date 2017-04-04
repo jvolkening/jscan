@@ -1,0 +1,271 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Config::Std { def_gap => 0 };
+use Cwd qw/abs_path getcwd/;
+use File::Basename;
+use File::HomeDir;
+use File::Temp qw/tempfile/;
+use FindBin;
+use Getopt::Long;
+use List::MoreUtils(qw/any mesh firstidx/);
+use List::Util;
+use Math::Trig;
+use PDL::NiceSlice;
+use PDL::Image2D;
+use PDL::Transform;
+use Time::Piece;
+use Imager;
+
+# Globals
+my $PROG_NAME = 'gRidder';
+my $PROG_VERSION = '0.1a';
+my $pdl;
+my $bits;
+
+my $cbin  = 2;
+my $threshold = .5;
+my $crop = .1;
+my $infile;
+my $outfile;
+my $min_dim = 600;
+
+my $success = GetOptions(
+    'in=s'  => \$infile,
+    'out=s' => \$outfile,
+    'cbin=f' => \$cbin,
+    'threshold=f' => \$threshold,
+    'crop=i'      => \$crop,
+    'min_dim=i'   => \$min_dim,
+
+);
+
+warn "loading PDL\n";
+$pdl = PDL->rpic($infile)->ushort();
+
+##image origin in PDL is at lower-left of image!!!
+## (basically, image array is flipped)
+## here we flip to to correspond with expected behavior
+$pdl = $pdl(:,-1:0); #flip image
+
+my ($w,$h) = dims $pdl;
+
+# downsample to 8-bit gray (if necessary)
+my $i2 = Imager->new();
+$i2->open(file => $infile);
+$bits = $i2->bits();
+my $curr_bits = $bits;
+if ($bits > 8) {
+    warn "downsampling to 8-bit image\n";
+    $pdl = $pdl >> ($bits - 8);
+    $curr_bits = 8;
+}
+
+warn "calc bounds\n";
+# set intensity bounds and do linear stretch
+my $max_int = max $pdl;
+my $min_int = min $pdl;
+
+warn "MIN: $min_int\nMAX: $max_int\n";
+$pdl = ((float $pdl) -$min_int)*(2**$curr_bits-1)/($max_int-$min_int);
+$pdl->where($pdl < 0) .= 0;
+$pdl->where($pdl > 2**$curr_bits-1) .= 2**$curr_bits-1;
+$pdl = $pdl > $threshold*(2**$curr_bits-1);
+my $scale = List::Util::max($w,$h)/$min_dim;
+
+my $angle = round(find_rotation($pdl),1);
+#warn "detected rotation: $angle\n"; #should always be -45 < x < 45
+
+$pdl = $pdl->rot2d($angle,0,0) if ($angle != 0);
+my @corners = find_corners($pdl);
+warn "crop: @corners\n";
+my $target_ratio = 8.5/11;
+my $new_w = $corners[3] - $corners[1];
+my $new_h = $corners[2] - $corners[0];
+if ($new_w/$new_h > $target_ratio) {
+    $new_w = round($new_h * $target_ratio,0);
+}
+else {
+    $new_h = round($new_w / $target_ratio,0);
+}
+my $x = round(($corners[3] + $corners[1])/2 - $new_w/2,0);
+my $y = round(($corners[2] + $corners[0])/2 - $new_h/2,0);
+
+my $geometry = $new_w . 'x' . $new_h . '+' . $x . '+' . $y;
+
+warn "rot: $angle\nwid: $new_w\nhgt: $new_h\nx  : $x\ny:  $y\n";
+if ($w - $new_w > 4 || $h - $new_h > 4) {
+    system("convert $infile -rotate \"$angle\" +repage -crop \"$geometry\" +repage $outfile");
+}
+else {
+    warn "not modifying image\n";
+    system("cp $infile $outfile");
+}
+
+exit;
+
+
+sub find_corners {
+
+    my $p = shift;
+    my ($w,$h) = dims $p;
+    my @x_left;
+    my @x_right;
+    Y:
+    for my $y ($crop*$h..$h-$crop*$h) {
+        next Y if ($y%$scale != 0);
+
+        my $x1 = 0;
+        my $int = 0;
+        while ($int == 0 && $x1 < $w) {
+            $int = $pdl->at($x1,$y);
+            ++$x1;
+        }
+        push @x_left, $x1;
+        $x1 = $w-1;
+        $int = 0;
+        while ($int == 0 && $x1 >= 0) {
+            $int = $pdl->at($x1,$y);
+            --$x1;
+        }
+        push @x_right, $x1;
+    }
+    my @sorted = sort {$a <=> $b} @x_left;
+    my $left_crop = $sorted[int(@x_left*.95)];
+    @sorted = sort {$a <=> $b} @x_right;
+    my $right_crop = $sorted[int(@x_right*.05)];
+
+    my @y_top;
+    my @y_bottom;
+    X:
+    for my $x ($crop*$w..$w-$crop*$w) {
+        next X if ($x%$scale != 0);
+        my $y1 = 0;
+        my $int = 0;
+        while ($int == 0 && $y1 < $h) {
+            $int = $pdl->at($x,$y1);
+            ++$y1;
+        }
+        push @y_top, $y1;
+        $y1 = $h-1;
+        $int = 0;
+        while ($int == 0 && $y1 >= 0) {
+            $int = $pdl->at($x,$y1);
+            --$y1;
+        }
+        push @y_bottom, $y1;
+    }
+    @sorted = sort {$a <=> $b} @y_top;
+    my $top_crop = $sorted[int(@y_top*.95)];
+    @sorted = sort {$a <=> $b} @y_bottom;
+    my $bottom_crop = $sorted[int(@y_bottom*.05)];
+    return($top_crop,$left_crop,$bottom_crop,$right_crop);
+}
+
+sub process_accumulator {
+
+    # determine optimal rotation from Hough accumulator hash (might be further
+    # optimized)
+    my $acc = shift;
+    my @sorted = sort {$acc->{$b} <=> $acc->{$a}} keys %{$acc};
+
+    my %squared = ();
+    for (@sorted) {
+        my ($r,$theta) = split ':', $_;
+        my $count = $acc->{$_};
+        $squared{$theta} += $count**2;
+    }
+    @sorted = sort {$squared{$b} <=> $squared{$a}} keys %squared;
+    return $sorted[0];
+
+}
+
+sub bin {
+
+    my ($val,$binsize) = @_;
+    $val *= 10;
+    $binsize *= 10;
+    my $i = int($val);
+    return ($i + $binsize - $i%$binsize)/10;
+
+}
+
+sub find_rotation {
+
+    my ($p) = @_;
+
+    use constant PI => 4*atan2(1,1);
+
+    use constant FINE_STEP   => PI / 360;
+    use constant MAX_ROT     => PI / 9;
+
+    # flip the PDL while doing trig calcs...
+    $p = $p(:,-1:0);
+    my ($w,$h) = dims $p;
+    my $new = PDL->zeroes($w/$scale,$h/$scale);
+    rescale2d($p,$new);
+    ($w,$h) = dims $new;
+    $p = $new;
+
+    #find voting points
+    warn "finding voting points...\n";
+
+    my $b3 = $p - $p->range([0,-1],[dims $p],'p') > 0;
+    $b3 = $b3(:,1:-1); #ignore bottom row (wrapped)
+    my $pts = $b3->whichND;
+    # $pts now contains voting points - white with black below
+
+    my ($pairs,$votes) = dims $pts;
+
+    # subsample points for speed
+    my $sub_frac = 0.2;
+
+    warn "testing " . int($votes*$sub_frac) . " points\n";
+
+    # Hough transform round 1 (coarse);
+    my %accumulator = ();
+    my $iter;
+    ($w,$h) = dims $p;
+    warn "performing coarse Hough transform...\n";
+
+
+    POINT:
+    for ($pts->dog) {
+	next POINT if (rand() > $sub_frac);
+        ++$iter;
+        my ($x,$y) = list $_;
+        next POINT if ($x < $crop*$w || $x > $w - $crop*$w); # try to avoid solid borders
+        next POINT if ($y < $crop*$h || $y > $h - $crop*$h); # try to avoid solid borders
+        $y = $h - $y - 1; 
+        for (my $theta = PI/2 + MAX_ROT; $theta >= PI/2 - MAX_ROT; $theta -= FINE_STEP) {
+            my $r = bin($x*cos($theta)+$y*sin($theta)+0.5, $cbin);
+            my $key = $r . ':' . $theta;
+            $accumulator{$key} += 1;
+        }
+    }
+    warn "processing accumulator\n";
+    my $radians = process_accumulator( \%accumulator );
+    my $angle = 90 - rad2deg($radians); #convert to rotation from horizontal
+
+    # flip it back before finishing
+    $p = $p(:,-1:0);
+
+    return $angle;
+
+}
+
+sub round {
+    my ($val,$places) = @_;
+    $places = $places // 0;
+    return (int($val*10**$places+0.5))/10**$places;
+}
+
+sub median {
+
+    my @sorted = sort {$a <=> $b} @_;
+    my $mid = int(@sorted/2);
+    return $sorted[$mid] if (@sorted%2);
+    return ($sorted[$mid-1] + $sorted[$mid])/2;
+
+}

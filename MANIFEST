@@ -1,0 +1,8 @@
+.gitattributes
+.travis.yml
+bin/hocr_by_line
+bin/jscan
+bin/letter
+Build.PL
+MANIFEST			This list of files
+t/pod.t
