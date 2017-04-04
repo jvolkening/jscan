@@ -1,121 +1,155 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 
 use strict;
 use warnings;
+use 5.012;
+
+use File::Copy;
+use File::Temp;
+use File::Which;
 use Getopt::Long;
 use Time::Piece;
 use Switch;
 use autodie qw/:all/;
 
-my $quality = 2;
-my $ocr     = 1;
-my $singles = 0;
-my $letter  = 0;
-my $thresh  = 40;
-my $trim    = 0;
+# defaults
+my $quality   = 2;
+my $ocr       = 0;
+my $singles   = 0;
+my $letter    = 0;
+my $thresh    = 40;
+my $trim      = 0;
+my $min_score = 70,
+my $crush_ocr = 0;
+my $prompt_fn = 0;
 
 my $scan_count = 0;
+my $page_idx   = 1;
+my $status     = 1;
+my @pages      = ();
+my $pdfname;
 
 GetOptions(
-
-    'quality=i' => \$quality,
-    'ocr=i'     => \$ocr,
-    'singles'   => \$singles,
-    'thresh=i'  => \$thresh,
-    'letter'    => \$letter,
-    'trim'      => \$trim,
-
+    'quality=i'    => \$quality,
+    'ocr'          => \$ocr,
+    'singles'      => \$singles,
+    'thresh=i'     => \$thresh,
+    'letter'       => \$letter,
+    'trim'         => \$trim,
+    'min_score'    => \$min_score,
+    'crush_ocr'    => \$crush_ocr,
+    'prompt_names' => \$prompt_fn,
 );
 
-my $t = localtime();
-my $datestring = $t->ymd;
-my $fulldatestring = $t->datetime();
-my @files = glob "$datestring\_*.pdf";
-my $start_idx = 0;
-my @existing = ();
-for (@files) {
-    my $tmp = $_;
-    $tmp =~ s/$datestring\_//;
-    $tmp =~ s/\.pdf//;
-    push @existing, $tmp;
+# check for required binaries
+my %BIN;
+for (qw/ scanimage convert tesseract hocr_by_word hocr_by_page letter/) {
+    my $bin = which $_;
+    die "Can't find $_ on path\n" if (! defined $bin);
+    $BIN{$_} = $bin;
 }
 
-@existing = sort {$a <=> $b} @existing;
-$start_idx = @existing > 0 ?$existing[-1] + 1 : 1;
-my $page_idx = 1;
-my $basename = sprintf "$datestring\_%05d", $start_idx++;
-my $pagename = sprintf "$basename\.%03d",   $page_idx++;
-my $outname  = "$pagename.pnm";
-my $outname1 = "$pagename.tmp.pnm";
-my $outname2 = "$pagename.png";
-my $pdfname  = "$basename.pdf";
-my $status = 1;
-my @pages;
-
+# main loop
+LOOP:
 while ($status) {
+
+    if (! defined $pdfname) {
+
+        my $t = localtime();
+        my $datestring = $t->ymd;
+        my $timestring = $t->hms('.');
+        $pdfname = "$datestring.$timestring.pdf";
+
+    }
+
+    my $t1   = File::Temp->new( UNLINK => 1, SUFFIX => '.pnm' );
+    my $t2   = File::Temp->new( UNLINK => 1, SUFFIX => '.png' );
+
     print "\ninsert sheet\n";
     my $crop = $trim ? '--swcrop ' : '';
-    system( "scanimage --mode gray --res 300 $crop > $outname" ) if ($quality != 5);
-    system( "scanimage --mode color --res 300 $crop > $outname" ) if ($quality == 5);
+    my $mode = $quality == 5 ? 'color' : 'gray';
+    my $ret = system( "$BIN{scanimage} --mode $mode --res 300 $crop > $t1" );
+    die "Failed during image scanning: $!\n" if ($ret);
     if ($letter) {
-        system( "letter --in $outname --out $outname1" );
-        unlink $outname;
+        my $t1a = File::Temp->new( UNLINK => 1, SUFFIX => '.pnm' );
+        my $ret = system( "$BIN{letter} --in $t1 --out $t1a" );
+        die "Failed running letter: $!\n" if ($ret);
+        copy($t1a => $t1) or die "Failed to copy letter output: $@\n";
     }
-    else {
-        system( "mv $outname $outname1" );
+    if ($ocr) {
+        $ret = system(
+            $BIN{convert},
+            $t1,
+            '-resize' => '150%',
+            '-contrast-stretch' => '0.5%x35%',
+            $t2
+        );
+        die "Failed running convert: $!\n" if ($ret);
+        my $base = "$t2";
+        $base =~ s/\.png$//;
+        $ret = system( "$BIN{tesseract} -l eng $t2 $base hocr" );
+        die "Failed running tesseract: $!\n" if ($ret);
     }
-    system( "convert $outname1 -resize 150% -contrast-stretch \"0.5%x35%\" $outname2" ) if ($ocr);
-    #system( "convert $outname1 -threshold $thresh% $outname2" ) if ($ocr);
-    #system( "convert $outname1 $outname2") if ($ocr);
-    system( "tesseract -l eng $outname2 $pagename hocr" ) if ($ocr);
-    switch($quality) {
-        case 1 { system( "convert $outname1 -resize 50% -threshold $thresh% -quality 90 $outname2" ) }
-        case 2 { system( "convert $outname1 -threshold $thresh% -quality 90 $outname2" ) }
-        case 3 { system( "convert $outname1 -resize 50% -contrast-stretch \"0.1%x20%\" -colors 4 -quality 90 $outname2" ) }
-        case 4 { system( "convert $outname1 -colors 4 -quality 90 $outname2" ) }
-        else   { system( "convert $outname1 $outname2" ) }
+    my @args = ($t1);
+    if ($quality == 1 || $quality == 3) {
+        push @args, '-resize', '50%';
     }
-    push @pages, $outname2;
-    unlink $outname1;
-    my $ret = 'd';
+    if ($quality == 1 || $quality == 2) {
+        push @args, '-threshold', "$thresh\%";
+    }
+    if ($quality == 3) {
+        push @args, '-contrast-stretch', "0.1\%x20\%";
+    }
+    if ($quality == 3 || $quality == 4) {
+        push @args, '-colors', 4;
+    }
+    push @args, '-quality', 90, $t2;
+    $ret = system(
+        $BIN{convert},
+        @args,
+    );
+
+    push @pages, $t2;
+
+    my $inp = 'd';
     if (! $singles) {
         print "\nwhat next? (p|d|q)";
-        $ret = <STDIN>;
-        chomp $ret;
+        $inp = <STDIN>;
+        chomp $inp;
     }
-    if ($ret eq 'p') {
-        $pagename = sprintf "$basename\.%03d", $page_idx++;
-        $outname = "$pagename.pnm";
-        $outname2 = "$pagename.png";
-        next;
+    if ($inp eq 'p') {
+        next LOOP;
     }
     #print "Enter keywords: ";
     #my $keywords = <STDIN>;
     #chomp $keywords;
     my $keywords = '';
-    switch($quality) {
-        case 1 { system( "hocr_by_line $ocr 450 150 $pdfname \"$keywords\" @pages" ) }
-        case 3 { system( "hocr_by_line $ocr 450 150 $pdfname \"$keywords\" @pages" ) }
-        else   { system( "hocr_by_line $ocr 450 300 $pdfname \"$keywords\" @pages" ) }
-    }
+    my $res = $quality == 1 || $quality == 3
+        ? 150
+        : 300;
+
+    my $hocr_bin = $crush_ocr ? $BIN{hocr_by_page} : $BIN{hocr_by_word};
+    $ret = system(
+        $hocr_bin,
+        $ocr ? 1 : 0,
+        450,
+        $res,
+        $pdfname,
+        "\"$keywords\"",
+        @pages,
+    );
+    die "Failed to run hocr_by_word\n" if ($ret);
     for (@pages) {
-        unlink $_;
         $_ =~ s/png$/hocr/;
-        unlink $_ if ($ocr);
+        unlink $_ if (-e $_);
     }
-    if ($ret eq 'd') {
-        $basename = sprintf "$datestring\_%05d", $start_idx++;
+    if ($inp eq 'd') {
         $page_idx = 1;
-        $pagename = sprintf "$basename\.%03d", $page_idx++;
-        $outname = "$pagename.pnm";
-        $outname2 = "$pagename.png";
-        $pdfname = "$basename.pdf";
         @pages = ();
-	print "Scanned " . ++$scan_count . " documents\n";
-        next;
+        $pdfname = undef;
+        print "Scanned " . ++$scan_count . " documents\n";
+        next LOOP;
     }
     $status = 0; # on 'q' or other, quit
 }
-
-print "\nBye!\n";
 

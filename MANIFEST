@@ -1,8 +1,10 @@
 .gitattributes
 .travis.yml
-bin/hocr_by_line
+bin/hocr_by_page
+bin/hocr_by_word
 bin/jscan
 bin/letter
 Build.PL
 MANIFEST			This list of files
+README
 t/pod.t
