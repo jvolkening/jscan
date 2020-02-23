@@ -39,6 +39,7 @@ GetOptions(
     'min_score'    => \$min_score,
     'crush_ocr'    => \$crush_ocr,
     'prompt_names' => \$prompt_fn,
+    'out=s'        => \$pdfname,
 );
 
 # check for required binaries

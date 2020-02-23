@@ -85,17 +85,8 @@ for my $file (@files) {
             my $w = $t->advancewidth($new_string);
             if ($w > $w_img) {
                 $t->text($string);
-                warn "L: $string\n";
                 $string = $token;
-                $y -= 1;
-                if ($y < 1) {
-                    die "ERROR: page text overrun\n";
-                }
-                $t = $page->text;
-                $t->translate(0,$y);
-                $t->fillcolor('red') if ($debug);
-                $t->render(3) if (! $debug) ; # make text invisible
-                $t->font( $f, 9 ); # set size arbitrarily, scale later
+                $t->nl();
             }
             else {
                 $string = $new_string;
