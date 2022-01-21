@@ -83,6 +83,7 @@ while ($status) {
             $t1,
             '-resize' => '150%',
             '-contrast-stretch' => '0.5%x35%',
+            '+repage',
             $t2
         );
         die "Failed running convert: $!\n" if ($ret);
