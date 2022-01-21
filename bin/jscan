@@ -42,6 +42,11 @@ GetOptions(
     'out=s'        => \$pdfname,
 );
 
+# if we want 'Letter' output size, trim is assumed
+if ($letter) {
+    $trim = 1;
+}
+
 # check for required binaries
 my %BIN;
 for (qw/ scanimage convert tesseract hocr_by_word hocr_by_page letter/) {
@@ -67,13 +72,14 @@ while ($status) {
     my $t2   = File::Temp->new( UNLINK => 1, SUFFIX => '.png' );
 
     print "\ninsert sheet\n";
-    my $crop = $trim ? '--swcrop ' : '';
+    #my $crop = $trim ? '--swcrop ' : '';
     my $mode = $quality == 5 ? 'color' : 'gray';
-    my $ret = system( "$BIN{scanimage} --mode $mode --res 300 $crop > $t1" );
+    my $ret = system( "$BIN{scanimage} --mode $mode --res 300 > $t1" );
     die "Failed during image scanning: $!\n" if ($ret);
-    if ($letter) {
+    if ($trim) {
         my $t1a = File::Temp->new( UNLINK => 1, SUFFIX => '.pnm' );
-        my $ret = system( "$BIN{letter} --in $t1 --out $t1a" );
+        my $letter_arg = $letter ? '--letter' : '';
+        my $ret = system( "$BIN{letter} $letter_arg --in $t1 --out $t1a" );
         die "Failed running letter: $!\n" if ($ret);
         copy($t1a => $t1) or die "Failed to copy letter output: $@\n";
     }

@@ -30,6 +30,7 @@ my $crop = .1;
 my $infile;
 my $outfile;
 my $min_dim = 600;
+my $letter = 0;
 
 my $success = GetOptions(
     'in=s'  => \$infile,
@@ -38,6 +39,7 @@ my $success = GetOptions(
     'threshold=f' => \$threshold,
     'crop=i'      => \$crop,
     'min_dim=i'   => \$min_dim,
+    'letter'      => \$letter,
 
 );
 
@@ -80,14 +82,16 @@ my $angle = round(find_rotation($pdl),1);
 $pdl = $pdl->rot2d($angle,0,0) if ($angle != 0);
 my @corners = find_corners($pdl);
 warn "crop: @corners\n";
-my $target_ratio = 8.5/11;
 my $new_w = $corners[3] - $corners[1];
 my $new_h = $corners[2] - $corners[0];
-if ($new_w/$new_h > $target_ratio) {
-    $new_w = round($new_h * $target_ratio,0);
-}
-else {
-    $new_h = round($new_w / $target_ratio,0);
+if ($letter) {
+    my $target_ratio = 8.5/11;
+    if ($new_w/$new_h > $target_ratio) {
+        $new_w = round($new_h * $target_ratio,0);
+    }
+    else {
+        $new_h = round($new_w / $target_ratio,0);
+    }
 }
 my $x = round(($corners[3] + $corners[1])/2 - $new_w/2,0);
 my $y = round(($corners[2] + $corners[0])/2 - $new_h/2,0);
